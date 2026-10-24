@@ -64,6 +64,15 @@ function formatRelative(ts) {
 function formatDate(ts) { return ts ? DTF.format(new Date(ts)) : '—'; }
 function formatTime(ts) { return TF.format(new Date(ts)); }
 
+const SDF = new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+/** Date courte : heure seule si c'est aujourd'hui, sinon jour + heure. */
+function formatShortDate(ts) {
+  const d = new Date(ts);
+  return d.toDateString() === new Date().toDateString()
+    ? d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
+    : SDF.format(d);
+}
+
 function formatDuration(ms) {
   if (ms == null) return '';
   if (ms < 1000) return `${ms} ms`;

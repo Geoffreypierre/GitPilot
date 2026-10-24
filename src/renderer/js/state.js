@@ -11,6 +11,7 @@ const State = (() => {
     settings: null,
     projects: [],
     runs: new Map(), // runId -> { ...summary, lines?: [] }
+    schedules: [],
   };
 
   const emit = (type, detail) => bus.dispatchEvent(new CustomEvent(type, { detail }));
@@ -82,6 +83,25 @@ const State = (() => {
     return n;
   }
 
+  /* ---------- Programmations ---------- */
+
+  function setSchedules(list) {
+    state.schedules = Array.isArray(list) ? list : [];
+    emit('schedules', state.schedules);
+  }
+
+  async function loadSchedules() {
+    setSchedules(await window.gitpilot.schedules.list());
+    return state.schedules;
+  }
+
+  function schedulesFor(projectId, actionId) {
+    return state.schedules
+      .filter((s) => s.projectId === projectId && (!actionId || s.actionId === actionId))
+      .sort((a, b) => a.runAt - b.runAt);
+  }
+
+  window.gitpilot.schedules.onChanged(setSchedules);
   window.gitpilot.runs.onStatus((summary) => trackRun(summary, { live: true }));
   window.gitpilot.runs.onOutput(({ runId, lines }) => {
     const run = state.runs.get(runId);
@@ -110,6 +130,9 @@ const State = (() => {
     runsFor,
     latestRunFor,
     runningCount,
+    loadSchedules,
+    setSchedules,
+    schedulesFor,
     allRuns: () => [...state.runs.values()].sort((a, b) => b.startedAt - a.startedAt),
   };
 })();

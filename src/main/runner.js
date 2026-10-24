@@ -15,6 +15,9 @@ const MAX_RUNS_PER_PROJECT = 30;
 const PARTIAL_FLUSH_MS = 300;
 const EMIT_BATCH_MS = 40;
 const TRACE_MARK = '\x1e';
+// Classement des lignes stderr : une ligne d'erreur colore aussi les lignes stderr qui la suivent.
+const STDERR_ERROR_RE = /^\s*(?:fatal|error|erreur|panic|traceback|exception)\b|^\s*npm err!|(?:error|erreur|exception)\s*:/i;
+const STDERR_WARNING_RE = /^\s*(?:warning|warn|avertissement|hint)\b|\bwarning\s*:/i;
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /[\u001b\u009b][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[a-zA-Z\d]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-ntqry=><~]))/g;
 
@@ -187,7 +190,7 @@ class Runner extends EventEmitter {
     return false;
   }
 
-  start({ project, action, shellId, timeoutMs, bashTrace }) {
+  start({ project, action, shellId, timeoutMs, bashTrace, note, extraEnv = {} }) {
     const run = {
       id: crypto.randomUUID(),
       projectId: project.id,
@@ -209,13 +212,15 @@ class Runner extends EventEmitter {
       partialTimers: {},
       cancelled: false,
       timedOut: false,
+      stderrLevel: null,
     };
     this.runs.set(run.id, run);
     this.prune(project.id);
 
     this.emit('status', this.summary(run));
-    this.push(run, 'info', `Exécution de '${action.name}' dans ${project.path}`);
+    this.push(run, 'info', `Exécution de '${action.name}' (${project.name})`);
     this.push(run, 'info', `Shell : ${shellLabel(shellId)}`);
+    if (note) this.push(run, 'info', note);
 
     let prepared;
     try {
@@ -234,6 +239,7 @@ class Runner extends EventEmitter {
       GITPILOT_PROJECT_NAME: project.name,
       GITPILOT_PROJECT_PATH: project.path,
       GITPILOT_ACTION_NAME: action.name,
+      ...extraEnv,
     };
     delete env.ELECTRON_RUN_AS_NODE;
 
@@ -282,7 +288,7 @@ class Runner extends EventEmitter {
         if (run.status !== 'running') return;
         child.stdout.destroy();
         child.stderr.destroy();
-        this.push(run, 'info', 'Le shell est terminé ; des processus lancés en arrière-plan par le script peuvent encore être actifs.');
+        this.push(run, 'warning', 'Le shell est terminé ; des processus lancés en arrière-plan par le script peuvent encore être actifs.');
         onEnd(code, signal);
       }, 2000);
     });
@@ -300,7 +306,7 @@ class Runner extends EventEmitter {
     const run = this.runs.get(runId);
     if (!run || run.status !== 'running') return false;
     run.cancelled = true;
-    this.push(run, 'info', "Arrêt demandé par l'utilisateur…");
+    this.push(run, 'warning', "Arrêt demandé par l'utilisateur…");
     this.kill(run);
     return true;
   }
@@ -367,7 +373,15 @@ class Runner extends EventEmitter {
     }
     if (text.length > MAX_LINE_LENGTH) text = `${text.slice(0, MAX_LINE_LENGTH)}…`;
 
+    if (type === 'stderr') {
+      if (STDERR_ERROR_RE.test(text)) run.stderrLevel = 'error';
+      else if (STDERR_WARNING_RE.test(text)) run.stderrLevel = 'warning';
+    } else if (type === 'stdout' || type === 'cmd') {
+      run.stderrLevel = null;
+    }
+
     const entry = { t: Date.now(), type, text };
+    if (type === 'stderr' && run.stderrLevel) entry.level = run.stderrLevel;
     run.lines.push(entry);
     if (run.lines.length > MAX_LINES) {
       run.lines.splice(0, run.lines.length - MAX_LINES);
@@ -395,7 +409,7 @@ class Runner extends EventEmitter {
 
     const seconds = ((run.endedAt - run.startedAt) / 1000).toFixed(1);
     if (status === 'success') this.push(run, 'success', `Succès ✅ (${seconds} s)`);
-    else if (status === 'cancelled') this.push(run, 'error', `Exécution annulée ⏹ (${seconds} s)`);
+    else if (status === 'cancelled') this.push(run, 'warning', `Exécution annulée ⏹ (${seconds} s)`);
     else this.push(run, 'error', `Échec ❌${exitCode != null ? ` — code de sortie ${exitCode}` : ''} (${seconds} s)`);
 
     for (const f of [run.file, run.pidFile]) if (f) fs.rm(f, { force: true }, () => {});

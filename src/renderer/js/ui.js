@@ -140,6 +140,80 @@ const UI = (() => {
   window.addEventListener('resize', closeDropdown);
   document.addEventListener('scroll', closeDropdown, true);
 
+  /* ---------- Info-bulles ---------- */
+  // Remplace les info-bulles natives : l'attribut title est déplacé dans data-tooltip
+  // au premier survol, puis affiché dans une bulle au style de l'application.
+  let tooltipEl = null;
+  let tooltipTarget = null;
+  let tooltipTimer = null;
+
+  function hideTooltip() {
+    clearTimeout(tooltipTimer);
+    tooltipEl?.remove();
+    tooltipEl = null;
+    tooltipTarget = null;
+  }
+
+  function adoptTitle(target) {
+    if (!target.hasAttribute('title')) return;
+    const text = target.getAttribute('title');
+    target.removeAttribute('title');
+    target.dataset.tooltip = text;
+    // Le title servait de nom accessible aux boutons sans texte.
+    if (text && !target.hasAttribute('aria-label') && !target.textContent.trim()) target.setAttribute('aria-label', text);
+  }
+
+  /**
+   * Zone réellement occupée par le contenu : un bloc pleine largeur (cellule,
+   * texte tronqué) est réduit à son texte pour centrer la bulle dessus.
+   */
+  function contentRect(target) {
+    const box = target.getBoundingClientRect();
+    const range = document.createRange();
+    range.selectNodeContents(target);
+    const inner = range.getBoundingClientRect();
+    if (!inner.width) return box;
+    const left = Math.max(box.left, inner.left);
+    const right = Math.min(box.right, inner.right);
+    return { left, right, width: right - left, top: box.top, bottom: box.bottom };
+  }
+
+  function showTooltip(target) {
+    if (!target.isConnected || !target.dataset.tooltip) return;
+    tooltipEl = h('div', { class: 'tooltip', role: 'tooltip' }, target.dataset.tooltip);
+    popoverRoot().append(tooltipEl);
+    const r = contentRect(target);
+    const w = tooltipEl.offsetWidth;
+    const ht = tooltipEl.offsetHeight;
+    const below = r.top - ht - 8 < 8;
+    const center = r.left + r.width / 2;
+    const left = Math.min(Math.max(8, center - w / 2), window.innerWidth - w - 8);
+    tooltipEl.classList.toggle('below', below);
+    tooltipEl.style.left = `${left}px`;
+    tooltipEl.style.top = `${below ? r.bottom + 8 : r.top - ht - 8}px`;
+    tooltipEl.style.setProperty('--arrow-x', `${center - left}px`);
+  }
+
+  function scheduleTooltip(target) {
+    if (target === tooltipTarget) return;
+    hideTooltip();
+    if (!target) return;
+    adoptTitle(target);
+    tooltipTarget = target;
+    tooltipTimer = setTimeout(() => showTooltip(target), 150);
+  }
+
+  document.addEventListener('mouseover', (e) => scheduleTooltip(e.target.closest?.('[title], [data-tooltip]') || null));
+  document.addEventListener('mouseout', (e) => { if (!e.relatedTarget) hideTooltip(); });
+  document.addEventListener('focusin', (e) => {
+    const target = e.target.closest?.('[title], [data-tooltip]');
+    if (target?.matches(':focus-visible')) scheduleTooltip(target);
+  });
+  document.addEventListener('focusout', hideTooltip);
+  document.addEventListener('mousedown', hideTooltip, true);
+  document.addEventListener('scroll', hideTooltip, true);
+  window.addEventListener('blur', hideTooltip);
+
   /* ---------- Éléments réutilisables ---------- */
   function alert(type, message, title) {
     const iconName = { danger: 'xCircle', warning: 'warning', info: 'info', success: 'checkCircle' }[type];

@@ -9,14 +9,12 @@ const HomeView = (() => {
     let filter = prefs.get('home.filter', '');
 
     const searchInput = h('input', {
-      class: 'input', type: 'search', placeholder: 'Filtrer les projets par nom ou chemin', value: filter,
+      class: 'input', type: 'search', placeholder: 'Filtrer les projets par nom', value: filter,
       oninput: () => { filter = searchInput.value; prefs.set('home.filter', filter); renderCards(); },
     });
     const grid = h('div', { class: 'cards' });
-    const countLabel = h('span', { class: 'muted' });
     const toolbar = h('div', { class: 'toolbar' },
       h('div', { class: 'search-box', style: { maxWidth: '420px' } }, iconEl('search'), searchInput),
-      countLabel,
     );
     const listArea = h('div');
     const body = h('div');
@@ -25,7 +23,6 @@ const HomeView = (() => {
       h('div', { class: 'page-header' },
         h('div', null,
           h('h1', { class: 'page-title' }, 'Projets'),
-          h('p', { class: 'page-subtitle' }, 'Vos dépôts Git locaux, réunis au même endroit'),
         ),
         h('div', { class: 'page-actions' },
           h('button', { class: 'btn btn-accent', onclick: () => openAddProjectModal(), html: `${icon('plus')}<span>Ajouter un projet</span>` }),
@@ -49,14 +46,13 @@ const HomeView = (() => {
 
       const q = filter.trim().toLowerCase();
       const visible = projects
-        .filter((p) => !q || p.name.toLowerCase().includes(q) || p.path.toLowerCase().includes(q))
+        .filter((p) => !q || p.name.toLowerCase().includes(q))
         .sort((a, b) => a.name.localeCompare(b.name, 'fr', { sensitivity: 'base' }));
 
       if (toolbar.parentNode !== body) {
         clear(body);
         body.append(toolbar, listArea);
       }
-      countLabel.textContent = `${visible.length} projet${visible.length > 1 ? 's' : ''}${q ? ` sur ${projects.length}` : ''}`;
 
       clear(listArea);
       clear(grid);
@@ -71,31 +67,28 @@ const HomeView = (() => {
     function card(project) {
       const branchLine = h('div', { class: 'card-branch' });
       const stats = h('div', { class: 'card-foot' });
-      const menuBtn = h('button', {
-        class: 'btn btn-sm btn-icon btn-tertiary menu-btn', title: 'Options', 'aria-label': 'Options', html: icon('ellipsis'),
-        onclick: (e) => {
-          e.stopPropagation();
-          UI.dropdown(menuBtn, [
-            { label: 'Ouvrir le projet', icon: 'chevronRight', onClick: () => App.navigate(`/project/${project.id}`) },
-            { label: 'Ouvrir le dossier', icon: 'folder', onClick: () => openFolder(project) },
-            'sep',
-            { label: 'Retirer du dashboard', icon: 'trash', danger: true, onClick: () => removeProject(project) },
-          ]);
-        },
-      });
+      const cardActions = h('div', { class: 'card-actions' },
+        h('button', {
+          class: 'btn btn-sm', type: 'button', title: 'Ouvrir le dossier', html: `${icon('folder')}<span>Ouvrir</span>`,
+          onclick: (e) => { e.stopPropagation(); openFolder(project); },
+        }),
+        h('button', {
+          class: 'btn btn-sm btn-danger', type: 'button', title: 'Retirer du dashboard', html: `${icon('trash')}<span>Retirer</span>`,
+          onclick: (e) => { e.stopPropagation(); removeProject(project); },
+        }),
+      );
 
       const el = h('div', {
         class: 'card', tabindex: '0', role: 'link', 'aria-label': `Ouvrir ${project.name}`,
         onclick: () => App.navigate(`/project/${project.id}`),
-        onkeydown: (e) => { if (e.key === 'Enter') App.navigate(`/project/${project.id}`); },
+        onkeydown: (e) => { if (e.key === 'Enter' && e.target === el) App.navigate(`/project/${project.id}`); },
       },
         h('div', { class: 'card-head' },
           h('div', { class: 'project-avatar', style: { background: colorFor(project.name) } }, initials(project.name)),
           h('div', { style: { minWidth: 0, flex: 1 } },
             h('div', { class: 'card-title ellipsis' }, project.name),
-            h('div', { class: 'card-path ellipsis', title: project.path }, h('bdi', null, project.path)),
           ),
-          menuBtn,
+          cardActions,
         ),
         branchLine,
         stats,
@@ -123,7 +116,7 @@ const HomeView = (() => {
           stats.append(
             actionsStat,
             h('span', { class: 'stat', title: 'Branches locales / distantes' }, iconEl('branch'), `${d.localCount} locale${d.localCount > 1 ? 's' : ''} · ${d.remoteCount} distante${d.remoteCount > 1 ? 's' : ''}`),
-            d.lastActivity ? h('span', { class: 'stat', title: `Dernier commit : ${formatDate(d.lastActivity)}`, style: { marginLeft: 'auto' } }, iconEl('clock'), formatRelative(d.lastActivity)) : null,
+            d.lastActivity ? h('span', { class: 'stat stat-date', title: `Dernier commit : ${formatDate(d.lastActivity)}` }, iconEl('clock'), formatRelative(d.lastActivity)) : null,
           );
         }
         if (running) {
@@ -173,7 +166,7 @@ const HomeView = (() => {
       message: h('div', null,
         h('p', { style: { marginTop: 0 } }, 'Retirer ', h('strong', null, project.name), ' du dashboard ?'),
         h('p', { class: 'muted', style: { marginBottom: 0 } },
-          `Les fichiers du dépôt (${project.path}) ne seront pas supprimés. Les ${project.actions.length} action(s) associée(s) seront retirées.`,
+          `Les fichiers du dépôt ne seront pas supprimés. Les ${project.actions.length} action(s) associée(s) seront retirées.`,
           running ? ' Les actions en cours seront arrêtées.' : ''),
       ),
       confirmLabel: 'Retirer',
@@ -254,7 +247,7 @@ const HomeView = (() => {
         m.busy = false;
         m.close();
         UI.toast(`Projet « ${res.project.name} » ajouté.`, 'success');
-        if (res.normalizedFrom) UI.toast(`Chemin ramené à la racine du dépôt : ${res.project.path}`, 'info');
+        if (res.normalizedFrom) UI.toast('Le dossier choisi est un sous-dossier : le projet a été ajouté à partir de la racine du dépôt.', 'info');
         if (!res.fetch.ok) UI.toast(`Le dépôt a été ajouté, mais git fetch a échoué : ${res.fetch.error}`, 'warning');
       } catch (err) {
         m.busy = false;

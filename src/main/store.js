@@ -14,6 +14,8 @@ const LIMITS = {
   script: 100_000,
 };
 
+const MAX_SCHEDULE_AHEAD_MS = 366 * 24 * 3600 * 1000;
+
 class ValidationError extends Error {
   constructor(message) {
     super(message);
@@ -40,9 +42,10 @@ class Store {
       timeoutMinutes: 15,
       fetchOnOpen: true,
       bashTrace: true,
+      ssh: { enabled: false, identities: [] },
       ...defaults,
     };
-    this.data = { version: 1, settings: { ...this.defaultSettings }, projects: [] };
+    this.data = { version: 1, settings: { ...this.defaultSettings }, projects: [], schedules: [], accounts: [], activeAccounts: {} };
     this.load();
   }
 
@@ -60,6 +63,15 @@ class Store {
         version: 1,
         settings: this.sanitizeSettings({ ...this.defaultSettings, ...(parsed.settings || {}) }),
         projects: Array.isArray(parsed.projects) ? parsed.projects.filter((p) => p && p.id && p.path) : [],
+        schedules: Array.isArray(parsed.schedules)
+          ? parsed.schedules.filter((s) => s && s.id && s.projectId && s.actionId && Number.isFinite(s.runAt))
+          : [],
+        accounts: Array.isArray(parsed.accounts)
+          ? parsed.accounts.filter((a) => a && typeof a.host === 'string' && (typeof a.secret === 'string' || typeof a.token === 'string'))
+          : [],
+        activeAccounts: parsed.activeAccounts && typeof parsed.activeAccounts === 'object'
+          ? Object.fromEntries(Object.entries(parsed.activeAccounts).filter(([k, v]) => typeof k === 'string' && typeof v === 'string'))
+          : {},
       };
       for (const p of this.data.projects) {
         if (!Array.isArray(p.actions)) p.actions = [];
@@ -92,6 +104,11 @@ class Store {
     if (Number.isFinite(t)) out.timeoutMinutes = Math.min(Math.max(Math.round(t), 1), 240);
     out.fetchOnOpen = s.fetchOnOpen !== false;
     out.bashTrace = s.bashTrace !== false;
+    const ssh = s.ssh && typeof s.ssh === 'object' ? s.ssh : {};
+    out.ssh = {
+      enabled: ssh.enabled === true,
+      identities: Array.isArray(ssh.identities) ? [...new Set(ssh.identities.filter((p) => typeof p === 'string' && p))].slice(0, 10) : [],
+    };
     return out;
   }
 
@@ -135,6 +152,7 @@ class Store {
     const before = this.data.projects.length;
     this.data.projects = this.data.projects.filter((p) => p.id !== id);
     if (this.data.projects.length === before) throw new ValidationError('Projet introuvable.');
+    this.data.schedules = this.data.schedules.filter((s) => s.projectId !== id);
     this.save();
   }
 
@@ -184,7 +202,69 @@ class Store {
     const before = project.actions.length;
     project.actions = project.actions.filter((a) => a.id !== actionId);
     if (project.actions.length === before) throw new ValidationError('Action introuvable.');
+    this.data.schedules = this.data.schedules.filter((s) => !(s.projectId === projectId && s.actionId === actionId));
     this.save();
+  }
+
+  /**
+   * Ajoute des actions (fichier d'import) à un projet. Même règle que la copie pour
+   * les noms déjà utilisés : ignorées, ou remplacées si `replace` est vrai.
+   */
+  importActions(projectId, inputs, { replace = false } = {}) {
+    const project = this.getProject(projectId);
+    if (!Array.isArray(inputs) || !inputs.length) throw new ValidationError('Aucune action à importer.');
+    const actions = inputs.slice(0, 200).map((input) => this.validateAction(input));
+    const result = { created: 0, replaced: 0, skipped: 0 };
+    const now = Date.now();
+    for (const data of actions) {
+      const existing = project.actions.find((a) => a.name.trim().toLowerCase() === data.name.toLowerCase());
+      if (existing && !replace) {
+        result.skipped += 1;
+      } else if (existing) {
+        Object.assign(existing, data, { updatedAt: now });
+        result.replaced += 1;
+      } else {
+        project.actions.push({ id: crypto.randomUUID(), ...data, createdAt: now, updatedAt: now, lastRun: null });
+        result.created += 1;
+      }
+    }
+    this.save();
+    return result;
+  }
+
+  /**
+   * Copie des actions vers d'autres projets. Une action portant déjà le même nom
+   * dans la destination est ignorée, ou remplacée si `replace` est vrai.
+   */
+  copyActions(sourceProjectId, actionIds, targetProjectIds, { replace = false } = {}) {
+    const source = this.getProject(sourceProjectId);
+    const ids = new Set(Array.isArray(actionIds) ? actionIds : []);
+    const actions = source.actions.filter((a) => ids.has(a.id));
+    if (!actions.length) throw new ValidationError('Sélectionnez au moins une action à copier.');
+    const targets = [...new Set(Array.isArray(targetProjectIds) ? targetProjectIds : [])]
+      .filter((id) => id !== sourceProjectId)
+      .map((id) => this.getProject(id));
+    if (!targets.length) throw new ValidationError('Sélectionnez au moins un projet de destination.');
+
+    const result = { created: 0, replaced: 0, skipped: 0 };
+    const now = Date.now();
+    for (const target of targets) {
+      for (const a of actions) {
+        const data = { name: a.name, description: a.description, script: a.script, shell: a.shell };
+        const existing = target.actions.find((t) => t.name.trim().toLowerCase() === a.name.trim().toLowerCase());
+        if (existing && !replace) {
+          result.skipped += 1;
+        } else if (existing) {
+          Object.assign(existing, data, { updatedAt: now });
+          result.replaced += 1;
+        } else {
+          target.actions.push({ id: crypto.randomUUID(), ...data, createdAt: now, updatedAt: now, lastRun: null });
+          result.created += 1;
+        }
+      }
+    }
+    this.save();
+    return result;
   }
 
   setActionLastRun(projectId, actionId, lastRun) {
@@ -194,6 +274,107 @@ class Store {
     action.lastRun = lastRun;
     try { this.save(); } catch (err) { console.error('[store] sauvegarde impossible :', err); }
   }
+
+  /* ---------- Comptes d'hébergement (jeton déjà chiffré par l'appelant) ---------- */
+
+  listAccounts() {
+    return this.data.accounts.map((a) => ({ ...a }));
+  }
+
+  getAccount(host, username) {
+    const account = this.data.accounts.find((a) => a.host === host && a.username === username);
+    return account ? { ...account } : null;
+  }
+
+  /** Ajoute ou remplace le compte (hôte + nom d'utilisateur). */
+  setAccount(account) {
+    this.data.accounts = this.data.accounts.filter((a) => !(a.host === account.host && a.username === account.username));
+    this.data.accounts.push({ ...account });
+    this.save();
+  }
+
+  /** Retire un compte, ou tous les comptes de l'hôte si `username` est absent. */
+  removeAccount(host, username) {
+    const before = this.data.accounts.length;
+    this.data.accounts = this.data.accounts.filter((a) => !(a.host === host && (username === undefined || a.username === username)));
+    if (this.data.accounts.length !== before) this.save();
+  }
+
+  getActiveAccount(host) {
+    return this.data.activeAccounts[host] || null;
+  }
+
+  setActiveAccount(host, username) {
+    if (username) this.data.activeAccounts[host] = username;
+    else delete this.data.activeAccounts[host];
+    this.save();
+  }
+
+  /* ---------- Programmations ---------- */
+
+  listSchedules() {
+    return this.data.schedules.map((s) => ({ ...s }));
+  }
+
+  findSchedule(id) {
+    return this.data.schedules.find((s) => s.id === id) || null;
+  }
+
+  createSchedule(projectId, actionId, runAt) {
+    this.getAction(projectId, actionId);
+    const at = Number(runAt);
+    const now = Date.now();
+    if (!Number.isFinite(at)) throw new ValidationError('Date de programmation invalide.');
+    if (at <= now) throw new ValidationError('La date de programmation doit être dans le futur.');
+    if (at > now + MAX_SCHEDULE_AHEAD_MS) throw new ValidationError("La date de programmation doit être dans moins d'un an.");
+    const schedule = { id: crypto.randomUUID(), projectId, actionId, runAt: at, createdAt: now, status: 'pending', error: null };
+    this.data.schedules.push(schedule);
+    this.save();
+    return { ...schedule };
+  }
+
+  updateSchedule(id, patch) {
+    const schedule = this.findSchedule(id);
+    if (!schedule) return;
+    Object.assign(schedule, patch);
+    try { this.save(); } catch (err) { console.error('[store] sauvegarde impossible :', err); }
+  }
+
+  removeSchedule(id) {
+    const before = this.data.schedules.length;
+    this.data.schedules = this.data.schedules.filter((s) => s.id !== id);
+    if (this.data.schedules.length === before) throw new ValidationError('Programmation introuvable.');
+    this.save();
+  }
 }
 
-module.exports = { Store, ValidationError, SHELL_IDS };
+/* ---------- Fichier d'export d'actions (.gitpilot.json) ---------- */
+
+const ACTIONS_FORMAT = 'gitpilot-actions';
+
+function buildActionsFile(projectName, actions) {
+  const payload = {
+    format: ACTIONS_FORMAT,
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    source: projectName,
+    actions: actions.map(({ name, description, shell, script }) => ({ name, description, shell, script })),
+  };
+  return `${JSON.stringify(payload, null, 2)}
+`;
+}
+
+/** Lit et vérifie un export ; les actions sont revalidées à l'import (importActions). */
+function parseActionsFile(text) {
+  let data;
+  try { data = JSON.parse(String(text).replace(/^﻿/, '')); } catch { throw new ValidationError("Ce fichier n'est pas un JSON valide."); }
+  if (data?.format !== ACTIONS_FORMAT || !Array.isArray(data.actions)) throw new ValidationError("Ce fichier n'est pas un export d'actions GitPilot.");
+  if (Number(data.version) > 1) throw new ValidationError('Ce fichier provient d’une version plus récente de GitPilot.');
+  const actions = data.actions
+    .filter((a) => a && typeof a.name === 'string' && typeof a.script === 'string')
+    .map((a) => ({ name: a.name, description: String(a.description || ''), shell: String(a.shell || 'default'), script: a.script }));
+  if (!actions.length) throw new ValidationError('Aucune action valide dans ce fichier.');
+  return { source: typeof data.source === 'string' ? data.source : null, actions };
+}
+
+module.exports = { Store, ValidationError, SHELL_IDS, buildActionsFile, parseActionsFile };
